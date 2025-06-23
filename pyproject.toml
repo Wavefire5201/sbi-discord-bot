@@ -5,6 +5,9 @@ description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
+    "asyncio>=3.4.3",
+    "google-genai>=1.21.1",
+    "lavalink>=5.9.0",
     "py-cord>=2.6.1",
     "pynacl>=1.5.0",
     "python-dotenv>=1.1.0",
