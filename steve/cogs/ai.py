@@ -1,12 +1,10 @@
-import os
-
 import discord
 from discord.ext import commands
 from google import genai
-from utils import get_logger
+from utils import GEMINI_API_KEY, get_logger
 
 logger = get_logger(__name__)
-client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
+client = genai.Client(api_key=GEMINI_API_KEY)
 
 
 class AI(commands.Cog):

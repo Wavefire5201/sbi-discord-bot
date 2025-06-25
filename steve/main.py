@@ -1,15 +1,6 @@
-import os
-
 import discord
 from discord.ext import commands
-from dotenv import load_dotenv
-from utils import get_logger
-
-# Basic setup
-load_dotenv()
-TOKEN = os.getenv("TOKEN")
-if TOKEN is None:
-    raise ValueError("TOKEN not set, not starting the bot.")
+from utils import TOKEN, get_logger
 
 logger = get_logger(__name__)
 logger.info("Logging started")

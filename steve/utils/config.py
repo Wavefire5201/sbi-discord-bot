@@ -1,0 +1,14 @@
+import os
+
+from dotenv import load_dotenv
+
+load_dotenv()
+
+
+TOKEN = os.getenv("TOKEN")
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+APPWRITE_ENDPOINT = os.getenv("APPWRITE_ENDPOINT")
+APPWRITE_API_KEY = os.getenv("APPWRITE_API_KEY")
+APPWRITE_PROJECT_ID = os.getenv("APPWRITE_PROJECT_ID")
+APPWRITE_DB_ID = os.getenv("APPWRITE_DB_ID")
+APPWRITE_COLLECTION_ID_MEETINGS = os.getenv("APPWRITE_COLLECTION_ID_MEETINGS")
