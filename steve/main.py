@@ -1,9 +1,9 @@
-import logging
 import os
 
 import discord
 from discord.ext import commands
 from dotenv import load_dotenv
+from utils import get_logger
 
 # Basic setup
 load_dotenv()
@@ -11,12 +11,7 @@ TOKEN = os.getenv("TOKEN")
 if TOKEN is None:
     raise ValueError("TOKEN not set, not starting the bot.")
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s - %(levelname)s - %(message)s",
-    handlers=[logging.FileHandler("bot.log"), logging.StreamHandler()],
-)
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 logger.info("Logging started")
 
 intents = discord.Intents.all()
@@ -57,7 +52,7 @@ async def help(ctx: discord.ApplicationContext):
 
 
 # Load cogs
-cogs = ["recording", "recording_alternative", "ai"]
+cogs = ["recording", "ai"]
 for cog in cogs:
     bot.load_extension(f"cogs.{cog}")
 

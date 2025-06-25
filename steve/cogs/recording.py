@@ -1,21 +1,37 @@
 import asyncio
-import logging
-import os
 import traceback
-from datetime import datetime, timedelta
+from datetime import datetime
+from pathlib import Path
 
 import discord
 from discord.ext import commands, tasks
+from utils import get_logger
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s - %(levelname)s - %(message)s",
-    handlers=[logging.FileHandler("bot.log"), logging.StreamHandler()],
-)
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 
-class RecordingAlternative(commands.Cog):
+def unix_time_now() -> int:
+    return round(datetime.now().timestamp())
+
+
+class RecordingView(discord.ui.View):
+    def __init__(self, _stop_recording):
+        super().__init__()
+        self._stop_recording = _stop_recording
+
+    async def disable_buttons(self):
+        for item in self.children:
+            if isinstance(item, discord.ui.Button):
+                item.disabled = True
+
+    @discord.ui.button(label="Stop Recording", style=discord.ButtonStyle.red)
+    async def stop_recording_callback(self, button, interaction: discord.Interaction):
+        await self._stop_recording(interaction)
+        await self.disable_buttons()
+        await interaction.message.edit(view=self)
+
+
+class Recording(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
         self.connections = {}
@@ -24,29 +40,29 @@ class RecordingAlternative(commands.Cog):
         self.status_update_task.start()
 
     @commands.slash_command(
-        name="record_alt",
-        description="Alternative recording implementation with better error handling",
+        name="join",
+        description="Join the voice channel and start recording",
     )
     @commands.guild_only()
-    async def record_alt(self, ctx: discord.ApplicationContext):
+    async def join(self, ctx: discord.ApplicationContext):
         voice = ctx.author.voice
 
         if not voice:
             embed = discord.Embed(
-                title="❌ Not in Voice Channel",
+                title="Not in Voice Channel",
                 description="You need to be in a voice channel to start recording!",
                 color=discord.Color.red(),
             )
-            await ctx.respond(embed=embed)
+            await ctx.respond(embed=embed, ephemeral=True)
             return
 
         if ctx.guild.id in self.connections:
             embed = discord.Embed(
-                title="⚠️ Already Recording",
-                description="Already recording in this server! Use `/stop_recording_alt` first.",
+                title="Already Recording",
+                description="Already recording in this server! Use `/stop` first.",
                 color=discord.Color.orange(),
             )
-            await ctx.respond(embed=embed)
+            await ctx.respond(embed=embed, ephemeral=True)
             return
 
         try:
@@ -57,11 +73,11 @@ class RecordingAlternative(commands.Cog):
             vc = await voice.channel.connect(reconnect=True, timeout=10.0)
 
             # Create initial status embed
-            start_time = datetime.now()
-            status_embed = self._create_status_embed(
-                ctx.guild.id, start_time, voice.channel.name
+            start_time = unix_time_now()
+            status_embed = self._create_status_embed(start_time, voice.channel.id)
+            status_message = await ctx.followup.send(
+                embed=status_embed, view=RecordingView(self._stop_recording)
             )
-            status_message = await ctx.followup.send(embed=status_embed)
 
             # Store connection
             self.connections[ctx.guild.id] = {
@@ -70,11 +86,14 @@ class RecordingAlternative(commands.Cog):
                 "start_time": start_time,
                 "users_recorded": set(),
                 "status_message": status_message,
-                "voice_channel_name": voice.channel.name,
+                "voice_channel_id": voice.channel.id,
             }
 
             # Create a custom sink with better error handling
             sink = SafeWaveSink()
+
+            # Play recording start sound
+            await self._play_recording_start_sound(vc)
 
             # Start recording with timeout protection
             vc.start_recording(
@@ -93,7 +112,7 @@ class RecordingAlternative(commands.Cog):
 
         except asyncio.TimeoutError:
             embed = discord.Embed(
-                title="❌ Connection Timeout",
+                title="Connection Timeout",
                 description="Failed to connect to voice channel (timeout)",
                 color=discord.Color.red(),
             )
@@ -103,7 +122,7 @@ class RecordingAlternative(commands.Cog):
             logger.error(f"Error starting recording: {e}")
             logger.error(traceback.format_exc())
             embed = discord.Embed(
-                title="❌ Recording Failed",
+                title="Recording Failed",
                 description=f"Failed to start recording: {str(e)}",
                 color=discord.Color.red(),
             )
@@ -167,7 +186,9 @@ class RecordingAlternative(commands.Cog):
 
             # Send results
             if files:
-                duration = datetime.now() - connection_info["start_time"]
+                duration = datetime.now() - datetime.fromtimestamp(
+                    connection_info["start_time"]
+                )
                 duration_str = str(duration).split(".")[0]  # Remove microseconds
 
                 embed = discord.Embed(
@@ -183,7 +204,7 @@ class RecordingAlternative(commands.Cog):
                     inline=False,
                 )
                 embed.set_footer(
-                    text=f"Recording finished at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+                    text=f"Recording finished at <t:{datetime.now().timestamp()}:f>"
                 )
 
                 await channel.send(embed=embed, files=files)
@@ -203,7 +224,7 @@ class RecordingAlternative(commands.Cog):
             logger.error(traceback.format_exc())
             try:
                 embed = discord.Embed(
-                    title="❌ Recording Error",
+                    title="Recording Error",
                     description=f"Recording finished, but there was an error processing the audio: {str(e)}",
                     color=discord.Color.red(),
                 )
@@ -214,20 +235,21 @@ class RecordingAlternative(commands.Cog):
             # Always clean up
             await self._cleanup_recording(guild_id)
 
-    @commands.slash_command(
-        name="stop_recording_alt", description="Stop the alternative recording"
-    )
+    @commands.slash_command(name="stop", description="Stop the current recording")
     @commands.guild_only()
-    async def stop_recording_alt(self, ctx: discord.ApplicationContext):
+    async def stop(self, ctx: discord.ApplicationContext):
         if ctx.guild.id not in self.connections:
             embed = discord.Embed(
-                title="❌ Not Recording",
+                title="Not Recording",
                 description="Not currently recording in this server.",
                 color=discord.Color.red(),
             )
-            await ctx.respond(embed=embed)
+            await ctx.respond(embed=embed, ephemeral=True)
             return
 
+        await self._stop_recording(ctx)
+
+    async def _stop_recording(self, ctx: discord.ApplicationContext):
         try:
             connection_info = self.connections[ctx.guild.id]
             vc = connection_info["voice_client"]
@@ -246,7 +268,7 @@ class RecordingAlternative(commands.Cog):
         except Exception as e:
             logger.error(f"Error stopping recording in guild {ctx.guild.id}: {e}")
             embed = discord.Embed(
-                title="❌ Stop Error",
+                title="Stop Error",
                 description=f"Error stopping recording: {str(e)}",
                 color=discord.Color.red(),
             )
@@ -254,25 +276,22 @@ class RecordingAlternative(commands.Cog):
             # Force cleanup even if there was an error
             await self._cleanup_recording(ctx.guild.id)
 
-    @commands.slash_command(
-        name="recording_status", description="Check recording status"
-    )
+    @commands.slash_command(name="status", description="Check recording status")
     @commands.guild_only()
-    async def recording_status(self, ctx: discord.ApplicationContext):
+    async def status(self, ctx: discord.ApplicationContext):
         if ctx.guild.id not in self.connections:
             embed = discord.Embed(
-                title="📴 Not Recording",
+                title="Not Recording",
                 description="Not currently recording in this server.",
                 color=discord.Color.red(),
             )
-            await ctx.respond(embed=embed)
+            await ctx.respond(embed=embed, ephemeral=True)
             return
 
         connection_info = self.connections[ctx.guild.id]
         status_embed = self._create_status_embed(
-            ctx.guild.id,
             connection_info["start_time"],
-            connection_info["voice_channel_name"],
+            connection_info["voice_channel_id"],
         )
         await ctx.respond(embed=status_embed)
 
@@ -292,7 +311,7 @@ class RecordingAlternative(commands.Cog):
                 # Send timeout message
                 try:
                     embed = discord.Embed(
-                        title="⏰ Recording Timeout",
+                        title="Recording Timeout",
                         description=f"Recording automatically stopped after {duration // 60} minutes (max duration reached)",
                         color=discord.Color.orange(),
                     )
@@ -346,26 +365,51 @@ class RecordingAlternative(commands.Cog):
         for guild_id in list(self.connections.keys()):
             asyncio.create_task(self._cleanup_recording(guild_id))
 
+    async def _play_recording_start_sound(self, voice_client):
+        """Play the recording started sound effect"""
+        try:
+            # Get path relative to this file's location
+            audio_path = (
+                Path(__file__).parent.parent / "audio" / "recording_started.wav"
+            )
+            if audio_path.exists():
+                # Create audio source
+                audio_source = discord.FFmpegPCMAudio(str(audio_path))
+
+                # Play the audio
+                voice_client.play(audio_source)
+
+                # Wait for audio to finish playing
+                while voice_client.is_playing():
+                    await asyncio.sleep(0.1)
+
+                logger.info("Played recording start sound")
+            else:
+                logger.warning(f"Recording start sound file not found: {audio_path}")
+        except Exception as e:
+            logger.error(f"Error playing recording start sound: {e}")
+
     def _create_status_embed(
-        self, guild_id: int, start_time: datetime, voice_channel_name: str
+        self, start_time: int, voice_channel_id: int
     ) -> discord.Embed:
         """Create a status embed for the recording"""
-        duration = datetime.now() - start_time
+        duration = datetime.now() - datetime.fromtimestamp(start_time)
         duration_str = str(duration).split(".")[0]  # Remove microseconds
 
-        remaining_time = self.max_recording_duration - duration.total_seconds()
-        remaining_str = str(timedelta(seconds=int(remaining_time))).split(".")[0]
-
         embed = discord.Embed(
-            title="🎙️ Recording in Progress", color=discord.Color.green()
+            title="🔴 Recording...",
+            color=discord.Color.green(),
+            timestamp=datetime.fromtimestamp(start_time),
         )
-        embed.add_field(name="⏱️ Duration", value=duration_str, inline=True)
-        embed.add_field(name="⏳ Time Remaining", value=remaining_str, inline=True)
-        embed.add_field(name="📊 Voice Channel", value=voice_channel_name, inline=True)
         embed.add_field(
-            name="🛑 Stop Command", value="`/stop_recording_alt`", inline=False
+            name="**Started:**",
+            value=f"<t:{start_time}:T> (<t:{start_time}:R>)",
+            inline=False,
         )
-        embed.set_footer(text=f"Started at {start_time.strftime('%Y-%m-%d %H:%M:%S')}")
+        embed.add_field(name="**Duration:**", value=duration_str, inline=False)
+        embed.add_field(
+            name="**Channel:**", value=f"<#{voice_channel_id}>", inline=False
+        )
 
         return embed
 
@@ -376,9 +420,8 @@ class RecordingAlternative(commands.Cog):
             try:
                 if "status_message" in connection_info:
                     status_embed = self._create_status_embed(
-                        guild_id,
                         connection_info["start_time"],
-                        connection_info["voice_channel_name"],
+                        connection_info["voice_channel_id"],
                     )
                     await connection_info["status_message"].edit(embed=status_embed)
             except Exception as e:
@@ -415,4 +458,4 @@ class SafeWaveSink(discord.sinks.MP3Sink):
 
 
 def setup(bot):
-    bot.add_cog(RecordingAlternative(bot))
+    bot.add_cog(Recording(bot))
