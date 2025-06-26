@@ -14,7 +14,7 @@ bot = discord.Bot(intents=intents)
 async def on_connect():
     if bot.auto_sync_commands:
         await bot.sync_commands()
-        print("Commands synced!")
+        logger.info("Commands synced!")
 
 
 @bot.event
@@ -24,7 +24,7 @@ async def on_ready():
             type=discord.ActivityType.watching, name="for sustainability..."
         )
     )
-    print(f"Logged in as {bot.user}")
+    logger.info(f"Logged in as {bot.user}")
 
 
 @bot.event
@@ -33,17 +33,17 @@ async def on_application_command_error(
 ):
     if isinstance(error, commands.NoPrivateMessage):
         await ctx.respond("This command can only be used in a server.")
+    elif isinstance(error, commands.MissingPermissions):
+        await ctx.respond(
+            "You do not have permission to use this command.", ephemeral=True
+        )
     else:
+        logger.error(f"Error occurred: {error}")
         raise error
 
 
-@bot.slash_command(name="help", description="help command")
-async def help(ctx: discord.ApplicationContext):
-    await ctx.respond("help command")
-
-
 # Load cogs
-cogs = ["recording", "ai"]
+cogs = ["recording", "ai", "utility"]
 for cog in cogs:
     bot.load_extension(f"cogs.{cog}")
 

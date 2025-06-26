@@ -4,14 +4,11 @@ from datetime import datetime
 from pathlib import Path
 
 import discord
-from discord.ext import commands, tasks
+from db import Meeting, create_meeting, create_recording, delete_meeting, update_meeting
+from discord.ext import commands
 from utils import get_logger
 
 logger = get_logger(__name__)
-
-
-def unix_time_now() -> int:
-    return round(datetime.now().timestamp())
 
 
 class RecordingView(discord.ui.View):
@@ -26,9 +23,10 @@ class RecordingView(discord.ui.View):
 
     @discord.ui.button(label="Stop Recording", style=discord.ButtonStyle.red)
     async def stop_recording_callback(self, button, interaction: discord.Interaction):
-        await self._stop_recording(interaction)
+        await interaction.response.defer()
+        await self._stop_recording(interaction.guild.id)
         await self.disable_buttons()
-        await interaction.message.edit(view=self)
+        await interaction.followup.edit_message(interaction.message.id, view=self)
 
 
 class Recording(commands.Cog):
@@ -37,7 +35,7 @@ class Recording(commands.Cog):
         self.connections = {}
         self.recording_tasks = {}
         self.max_recording_duration = 3600 * 5  # 5 hour max recording
-        self.status_update_task.start()
+        # self.status_update_task.start()
 
     @commands.slash_command(
         name="join",
@@ -45,7 +43,18 @@ class Recording(commands.Cog):
     )
     @commands.guild_only()
     async def join(self, ctx: discord.ApplicationContext):
-        voice = ctx.author.voice
+        # Type cast to Member to access voice attribute
+        member = ctx.author
+        if not isinstance(member, discord.Member):
+            embed = discord.Embed(
+                title="Error",
+                description="This command can only be used in a server.",
+                color=discord.Color.red(),
+            )
+            await ctx.respond(embed=embed, ephemeral=True)
+            return
+
+        voice = member.voice
 
         if not voice:
             embed = discord.Embed(
@@ -73,20 +82,31 @@ class Recording(commands.Cog):
             vc = await voice.channel.connect(reconnect=True, timeout=10.0)
 
             # Create initial status embed
-            start_time = unix_time_now()
+            start_time = datetime.now()
             status_embed = self._create_status_embed(start_time, voice.channel.id)
+            status_view = RecordingView(self._stop_recording)
             status_message = await ctx.followup.send(
-                embed=status_embed, view=RecordingView(self._stop_recording)
+                embed=status_embed, view=status_view
+            )
+
+            meeting = await create_meeting(
+                Meeting(
+                    guild_id=ctx.guild.id,
+                    channel_id=voice.channel.id,
+                    start=start_time,
+                )
             )
 
             # Store connection
             self.connections[ctx.guild.id] = {
                 "voice_client": vc,
+                "voice_channel_id": voice.channel.id,
                 "channel": ctx.channel,
                 "start_time": start_time,
                 "users_recorded": set(),
                 "status_message": status_message,
-                "voice_channel_id": voice.channel.id,
+                "status_view": status_view,
+                "meeting": meeting,
             }
 
             # Create a custom sink with better error handling
@@ -107,7 +127,7 @@ class Recording(commands.Cog):
             self.recording_tasks[ctx.guild.id] = timeout_task
 
             logger.info(
-                f"Started alternative recording in guild {ctx.guild.id}, channel {voice.channel.name}"
+                f"Started recording in guild {ctx.guild.id}, channel {voice.channel.name}"
             )
 
         except asyncio.TimeoutError:
@@ -130,7 +150,7 @@ class Recording(commands.Cog):
             # Clean up on error
             await self._cleanup_recording(ctx.guild.id)
 
-    async def recording_finished_callback(self, sink, channel, guild_id, *args):
+    async def recording_finished_callback(self, sink, channel, guild_id):
         """Callback when recording finishes"""
         try:
             logger.info(f"Recording finished for guild {guild_id}")
@@ -145,15 +165,18 @@ class Recording(commands.Cog):
                 logger.warning(f"No connection info found for guild {guild_id}")
                 return
 
+            meeting: Meeting = self.connections[guild_id]["meeting"]
+
             # Check if we have any audio data
             if not hasattr(sink, "audio_data") or not sink.audio_data:
                 embed = discord.Embed(
-                    title="🎙️ Recording Complete",
+                    title="Recording Complete",
                     description="Recording finished, but no audio was captured. Make sure users are speaking!",
                     color=discord.Color.orange(),
                 )
                 await channel.send(embed=embed)
                 logger.info(f"No audio data captured for guild {guild_id}")
+                await delete_meeting(meeting.id)
                 return
 
             # Process audio files
@@ -171,12 +194,20 @@ class Recording(commands.Cog):
                         audio_data.file.seek(0)
 
                         if file_size > 0:
-                            filename = f"recording_{user_id}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.{sink.encoding}"
-                            files.append(discord.File(audio_data.file, filename))
-                            recorded_users.append(f"<@{user_id}>")
-                            logger.info(
-                                f"Created audio file for user {user_id}, size: {file_size} bytes"
-                            )
+                            file_name = f"{user_id}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.{sink.encoding}"
+                            try:
+                                file_id = await create_recording(
+                                    file_name, audio_data.file
+                                )
+                                files.append(file_id)
+                                recorded_users.append(f"<@{user_id}>")
+                                logger.info(
+                                    f"Created audio file for user {user_id}, size: {file_size} bytes"
+                                )
+                            except Exception as e:
+                                logger.error(
+                                    f"Error creating audio file for user {user_id}: {e}"
+                                )
                         else:
                             logger.warning(f"Empty audio file for user {user_id}")
 
@@ -186,33 +217,31 @@ class Recording(commands.Cog):
 
             # Send results
             if files:
-                duration = datetime.now() - datetime.fromtimestamp(
-                    connection_info["start_time"]
-                )
-                duration_str = str(duration).split(".")[0]  # Remove microseconds
+                # Add recording files to meeting
+                meeting.recordings = files
+                await update_meeting(meeting.id, meeting)
+
+                duration = datetime.now() - connection_info["start_time"]
+                duration_str = str(duration).split(".")[0]
 
                 embed = discord.Embed(
-                    title="🎙️ Recording Complete!", color=discord.Color.green()
+                    title="Recording Complete!", color=discord.Color.green()
                 )
-                embed.add_field(name="⏱️ Duration", value=duration_str, inline=True)
+                embed.add_field(name="Duration", value=duration_str, inline=True)
                 embed.add_field(
-                    name="📁 Files", value=f"{len(files)} audio file(s)", inline=True
-                )
-                embed.add_field(
-                    name="👥 Recorded Users",
+                    name="Recorded Users",
                     value=", ".join(recorded_users),
                     inline=False,
                 )
                 embed.set_footer(
-                    text=f"Recording finished at <t:{datetime.now().timestamp()}:f>"
+                    text=f"Recording finished at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
                 )
 
-                await channel.send(embed=embed, files=files)
-                logger.info(f"Sent {len(files)} audio files for guild {guild_id}")
+                await channel.send(embed=embed)
             else:
                 embed = discord.Embed(
-                    title="🎙️ Recording Complete",
-                    description="Recording finished, but no valid audio files could be created. "
+                    title="Recording Complete",
+                    description="Recording finished, but no valid audio files were created. "
                     "This might happen if users weren't speaking or there were connection issues.",
                     color=discord.Color.orange(),
                 )
@@ -229,8 +258,8 @@ class Recording(commands.Cog):
                     color=discord.Color.red(),
                 )
                 await channel.send(embed=embed)
-            except:
-                logger.error("Failed to send error message to channel")
+            except Exception as e:
+                logger.error(f"Failed to send error message to channel: {e}")
         finally:
             # Always clean up
             await self._cleanup_recording(guild_id)
@@ -238,33 +267,18 @@ class Recording(commands.Cog):
     @commands.slash_command(name="stop", description="Stop the current recording")
     @commands.guild_only()
     async def stop(self, ctx: discord.ApplicationContext):
-        if ctx.guild.id not in self.connections:
-            embed = discord.Embed(
-                title="Not Recording",
-                description="Not currently recording in this server.",
-                color=discord.Color.red(),
-            )
-            await ctx.respond(embed=embed, ephemeral=True)
-            return
-
-        await self._stop_recording(ctx)
-
-    async def _stop_recording(self, ctx: discord.ApplicationContext):
         try:
-            connection_info = self.connections[ctx.guild.id]
-            vc = connection_info["voice_client"]
+            if ctx.guild.id not in self.connections:
+                embed = discord.Embed(
+                    title="Not Recording",
+                    description="Not currently recording in this server.",
+                    color=discord.Color.red(),
+                )
+                await ctx.respond(embed=embed, ephemeral=True)
+                return
 
-            # Stop recording
-            vc.stop_recording()
-
-            embed = discord.Embed(
-                title="⏹️ Stopping Recording",
-                description="Recording is being stopped and processed...",
-                color=discord.Color.blue(),
-            )
-            await ctx.respond(embed=embed)
-            logger.info(f"Manually stopped recording in guild {ctx.guild.id}")
-
+            await self._stop_recording(ctx.guild.id)
+            await ctx.delete()
         except Exception as e:
             logger.error(f"Error stopping recording in guild {ctx.guild.id}: {e}")
             embed = discord.Embed(
@@ -275,6 +289,37 @@ class Recording(commands.Cog):
             await ctx.respond(embed=embed)
             # Force cleanup even if there was an error
             await self._cleanup_recording(ctx.guild.id)
+
+    async def _stop_recording(self, guild_id: int):
+        connection_info = self.connections[guild_id]
+        vc: discord.VoiceClient = connection_info["voice_client"]
+
+        # Update status embed and disable buttons
+        await self._update_status_to_ended(guild_id)
+        vc.stop_recording()
+        logger.info(f"Manually stopped recording in guild {guild_id}")
+
+    async def _update_status_to_ended(self, guild_id: int):
+        """Update the status embed to show 'Recording ended.' and disable buttons"""
+        try:
+            connection_info = self.connections.get(guild_id)
+            if not connection_info or "status_message" not in connection_info:
+                return
+
+            status_message = connection_info["status_message"]
+            status_view = connection_info["status_view"]
+
+            ended_embed = self._create_status_embed(
+                connection_info["start_time"],
+                connection_info["voice_channel_id"],
+                ended=True,
+            )
+
+            await status_view.disable_buttons()
+            await status_message.edit(embed=ended_embed, view=status_view)
+
+        except Exception as e:
+            logger.error(f"Error updating status embed for guild {guild_id}: {e}")
 
     @commands.slash_command(name="status", description="Check recording status")
     @commands.guild_only()
@@ -316,8 +361,10 @@ class Recording(commands.Cog):
                         color=discord.Color.orange(),
                     )
                     await connection_info["channel"].send(embed=embed)
-                except:
-                    logger.error(f"Failed to send timeout message for guild {guild_id}")
+                except Exception as e:
+                    logger.error(
+                        f"Failed to send timeout message for guild {guild_id}: {e}"
+                    )
 
         except asyncio.CancelledError:
             logger.info(f"Auto-stop task cancelled for guild {guild_id}")
@@ -390,47 +437,52 @@ class Recording(commands.Cog):
             logger.error(f"Error playing recording start sound: {e}")
 
     def _create_status_embed(
-        self, start_time: int, voice_channel_id: int
+        self, start_time: datetime, voice_channel_id: int, ended: bool = False
     ) -> discord.Embed:
         """Create a status embed for the recording"""
-        duration = datetime.now() - datetime.fromtimestamp(start_time)
-        duration_str = str(duration).split(".")[0]  # Remove microseconds
 
+        if ended:
+            title = "Recording ended."
+            color = discord.Color.red()
+        else:
+            title = "🔴 Recording..."
+            color = discord.Color.green()
+
+        unix_time = round(datetime.timestamp(start_time))
         embed = discord.Embed(
-            title="🔴 Recording...",
-            color=discord.Color.green(),
-            timestamp=datetime.fromtimestamp(start_time),
+            title=title,
+            color=color,
+            timestamp=start_time,
         )
         embed.add_field(
             name="**Started:**",
-            value=f"<t:{start_time}:T> (<t:{start_time}:R>)",
+            value=f"<t:{unix_time}:T> (<t:{unix_time}:R>)",
             inline=False,
         )
-        embed.add_field(name="**Duration:**", value=duration_str, inline=False)
         embed.add_field(
             name="**Channel:**", value=f"<#{voice_channel_id}>", inline=False
         )
 
         return embed
 
-    @tasks.loop(seconds=1)
-    async def status_update_task(self):
-        """Update status embeds every second"""
-        for guild_id, connection_info in list(self.connections.items()):
-            try:
-                if "status_message" in connection_info:
-                    status_embed = self._create_status_embed(
-                        connection_info["start_time"],
-                        connection_info["voice_channel_id"],
-                    )
-                    await connection_info["status_message"].edit(embed=status_embed)
-            except Exception as e:
-                logger.error(f"Error updating status embed for guild {guild_id}: {e}")
+    # @tasks.loop(seconds=1)
+    # async def status_update_task(self):
+    #     """Update status embeds every second"""
+    #     for guild_id, connection_info in list(self.connections.items()):
+    #         try:
+    #             if "status_message" in connection_info:
+    #                 status_embed = self._create_status_embed(
+    #                     connection_info["start_time"],
+    #                     connection_info["voice_channel_id"],
+    #                 )
+    #                 await connection_info["status_message"].edit(embed=status_embed)
+    #         except Exception as e:
+    #             logger.error(f"Error updating status embed for guild {guild_id}: {e}")
 
-    @status_update_task.before_loop
-    async def before_status_update(self):
-        """Wait until bot is ready before starting status updates"""
-        await self.bot.wait_until_ready()
+    # @status_update_task.before_loop
+    # async def before_status_update(self):
+    #     """Wait until bot is ready before starting status updates"""
+    #     await self.bot.wait_until_ready()
 
 
 class SafeWaveSink(discord.sinks.MP3Sink):

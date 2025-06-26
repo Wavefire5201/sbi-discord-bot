@@ -10,8 +10,8 @@ def setup_logging(level=logging.INFO):
     Args:
         level: Logging level (default: logging.INFO)
     """
-    # Get the project root directory (steve folder)
-    project_root = Path(__file__).parent.parent
+    # Get the project root directory (sbi-discord-bot folder)
+    project_root = Path(__file__).parent.parent.parent
 
     # Ensure logs directory exists in project root
     logs_dir = project_root / "logs"
