@@ -2,14 +2,11 @@ import asyncio
 from typing import Optional
 
 from appwrite.id import ID
-from utils import (
-    APPWRITE_COLLECTION_ID_PEOPLE,
-    APPWRITE_DB_ID,
-    get_logger,
-)
+from utils import get_logger
+from utils.config import APPWRITE_COLLECTION_ID_PEOPLE, APPWRITE_DB_ID
 
 from .database import database
-from .models import Person
+from .types import Person
 
 logger = get_logger(__name__)
 

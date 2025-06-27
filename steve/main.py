@@ -1,6 +1,7 @@
 import discord
 from discord.ext import commands
-from utils import TOKEN, get_logger
+from utils import get_logger
+from utils.config import TOKEN
 
 logger = get_logger(__name__)
 logger.info("Logging started")
@@ -43,7 +44,7 @@ async def on_application_command_error(
 
 
 # Load cogs
-cogs = ["recording", "ai", "utility"]
+cogs = ["recording", "ai_", "utility", "admin", "meetings"]
 for cog in cogs:
     bot.load_extension(f"cogs.{cog}")
 

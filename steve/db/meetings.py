@@ -3,15 +3,15 @@ from typing import Optional
 
 from appwrite.id import ID
 from appwrite.input_file import InputFile
-from utils import (
+from utils import get_logger
+from utils.config import (
     APPWRITE_BUCKET_ID_MEETINGS,
     APPWRITE_COLLECTION_ID_MEETINGS,
     APPWRITE_DB_ID,
-    get_logger,
 )
 
 from .database import database, storage
-from .models import Meeting
+from .types import Meeting
 
 logger = get_logger(__name__)
 

@@ -16,6 +16,7 @@ class Meeting:
     - participants: List[int] = field(default_factory=list)
     - recordings: List[str] = field(default_factory=list)
     - transcription: Optional[str] = None
+    - transcription_id: Optional[str] = None
     - id: Optional[str] = None
     """
 
@@ -27,6 +28,7 @@ class Meeting:
     participants: List[int] = field(default_factory=list)
     recordings: List[str] = field(default_factory=list)
     transcription: Optional[str] = None
+    transcription_id: Optional[str] = None
     id: Optional[str] = None
 
     def to_dict(self) -> dict:

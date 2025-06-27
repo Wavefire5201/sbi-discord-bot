@@ -5,8 +5,8 @@ from .meetings import (
     get_meeting,
     update_meeting,
 )
-from .models import Meeting, Person
 from .people import create_person, get_person, update_person
+from .types import Meeting, Person
 
 __all__ = [
     "create_meeting",

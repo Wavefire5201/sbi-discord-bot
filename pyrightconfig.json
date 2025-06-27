@@ -1,4 +1,5 @@
 {
   "reportOptionalMemberAccess": false,
-  "reportArgumentType": false
+  "reportArgumentType": false,
+  "reportPossiblyUnboundVariable": false
 }

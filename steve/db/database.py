@@ -1,7 +1,7 @@
 from appwrite.client import Client
 from appwrite.services.databases import Databases
 from appwrite.services.storage import Storage
-from utils import (
+from utils.config import (
     APPWRITE_API_KEY,
     APPWRITE_ENDPOINT,
     APPWRITE_PROJECT_ID,

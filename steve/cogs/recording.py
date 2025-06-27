@@ -4,16 +4,17 @@ from datetime import datetime
 from pathlib import Path
 
 import discord
+from ai import start_transcription
 from db import Meeting, create_meeting, create_recording, delete_meeting, update_meeting
-from discord.ext import commands
+from discord.ext import commands, tasks
 from utils import get_logger
 
 logger = get_logger(__name__)
 
 
 class RecordingView(discord.ui.View):
-    def __init__(self, _stop_recording):
-        super().__init__()
+    def __init__(self, _stop_recording, timeout):
+        super().__init__(timeout=timeout)
         self._stop_recording = _stop_recording
 
     async def disable_buttons(self):
@@ -35,7 +36,8 @@ class Recording(commands.Cog):
         self.connections = {}
         self.recording_tasks = {}
         self.max_recording_duration = 3600 * 5  # 5 hour max recording
-        # self.status_update_task.start()
+        self.vc = None
+        self.socket_keepalive.start()
 
     @commands.slash_command(
         name="join",
@@ -84,7 +86,7 @@ class Recording(commands.Cog):
             # Create initial status embed
             start_time = datetime.now()
             status_embed = self._create_status_embed(start_time, voice.channel.id)
-            status_view = RecordingView(self._stop_recording)
+            status_view = RecordingView(self._stop_recording, timeout=None)
             status_message = await ctx.followup.send(
                 embed=status_embed, view=status_view
             )
@@ -108,6 +110,7 @@ class Recording(commands.Cog):
                 "status_view": status_view,
                 "meeting": meeting,
             }
+            self.vc = vc
 
             # Create a custom sink with better error handling
             sink = SafeWaveSink()
@@ -200,7 +203,7 @@ class Recording(commands.Cog):
                                     file_name, audio_data.file
                                 )
                                 files.append(file_id)
-                                recorded_users.append(f"<@{user_id}>")
+                                recorded_users.append(user_id)
                                 logger.info(
                                     f"Created audio file for user {user_id}, size: {file_size} bytes"
                                 )
@@ -217,8 +220,18 @@ class Recording(commands.Cog):
 
             # Send results
             if files:
-                # Add recording files to meeting
+                message: discord.Message = await channel.send(
+                    embed=discord.Embed(
+                        title="Processing recordings and saving files...",
+                        color=discord.Color.blurple(),
+                    )
+                )
+
+                # Add meeting metadata when complete
                 meeting.recordings = files
+                meeting.participants = recorded_users
+                meeting.end = datetime.now()
+
                 await update_meeting(meeting.id, meeting)
 
                 duration = datetime.now() - connection_info["start_time"]
@@ -227,17 +240,28 @@ class Recording(commands.Cog):
                 embed = discord.Embed(
                     title="Recording Complete!", color=discord.Color.green()
                 )
-                embed.add_field(name="Duration", value=duration_str, inline=True)
+                embed.add_field(name="Meeting ID", value=f"`{meeting.id}`")
+                embed.add_field(name="Duration", value=duration_str)
                 embed.add_field(
                     name="Recorded Users",
-                    value=", ".join(recorded_users),
+                    value=", ".join([f"<@{user}>" for user in recorded_users]),
                     inline=False,
                 )
                 embed.set_footer(
                     text=f"Recording finished at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
                 )
 
-                await channel.send(embed=embed)
+                await message.edit(embed=embed)
+                ts_result = await start_transcription(meeting=meeting)
+                if ts_result:
+                    await channel.send(
+                        embed=discord.Embed(
+                            title="Transcription success!",
+                            description="A copy of the transcription has been saved successfully.",
+                            color=discord.Color.green(),
+                        )
+                    )
+
             else:
                 embed = discord.Embed(
                     title="Recording Complete",
@@ -408,11 +432,15 @@ class Recording(commands.Cog):
     def cog_unload(self):
         """Clean up when cog is unloaded"""
         logger.info("Cleaning up all recordings on cog unload")
-        self.status_update_task.cancel()
+        # Cancel socket keepalive task
+        self.socket_keepalive.cancel()
+        # Cancel status update task only if it exists and is running
+        if hasattr(self, "status_update_task") and self.status_update_task.is_running():
+            self.status_update_task.cancel()
         for guild_id in list(self.connections.keys()):
             asyncio.create_task(self._cleanup_recording(guild_id))
 
-    async def _play_recording_start_sound(self, voice_client):
+    async def _play_recording_start_sound(self, voice_client: discord.VoiceClient):
         """Play the recording started sound effect"""
         try:
             # Get path relative to this file's location
@@ -465,28 +493,25 @@ class Recording(commands.Cog):
 
         return embed
 
-    # @tasks.loop(seconds=1)
-    # async def status_update_task(self):
-    #     """Update status embeds every second"""
-    #     for guild_id, connection_info in list(self.connections.items()):
-    #         try:
-    #             if "status_message" in connection_info:
-    #                 status_embed = self._create_status_embed(
-    #                     connection_info["start_time"],
-    #                     connection_info["voice_channel_id"],
-    #                 )
-    #                 await connection_info["status_message"].edit(embed=status_embed)
-    #         except Exception as e:
-    #             logger.error(f"Error updating status embed for guild {guild_id}: {e}")
-
-    # @status_update_task.before_loop
-    # async def before_status_update(self):
-    #     """Wait until bot is ready before starting status updates"""
-    #     await self.bot.wait_until_ready()
+    @tasks.loop(seconds=10)
+    async def socket_keepalive(self):
+        """
+        Send silent packets to prevent Discord from closing the listening socket.
+        This fixes Opus decoding errors caused by socket timeouts during periods of silence.
+        Only sends packets during active recordings to avoid unnecessary traffic.
+        """
+        try:
+            if self.vc:
+                # Send silent audio packet to keep socket alive during recording
+                self.vc.send_audio_packet(b"\xf8\xff\xfe", encode=False)
+                logger.info("Sent keepalive packet")
+        except Exception as e:
+            logger.warning(f"Error sending keepalive packet for guild: {e}")
+        return
 
 
 class SafeWaveSink(discord.sinks.MP3Sink):
-    """A safer version of WaveSink with better error handling"""
+    """A safer version of MP3Sink with simple error handling"""
 
     def __init__(self):
         super().__init__()
@@ -495,18 +520,18 @@ class SafeWaveSink(discord.sinks.MP3Sink):
     def write(self, data, user):
         """Override write method with error handling"""
         try:
-            return super().write(data, user)
+            if data and len(data) > 0:
+                return super().write(data, user)
         except Exception as e:
-            logger.error(f"Error writing audio data for user {user}: {e}")
-            # Continue without crashing
-            pass
+            # Silently skip bad audio data to prevent crashes
+            logger.debug(f"Skipped audio data for user {user}: {e}")
 
     def cleanup(self):
         """Override cleanup with error handling"""
         try:
             return super().cleanup()
         except Exception as e:
-            logger.error(f"Error during sink cleanup: {e}")
+            logger.debug(f"Error during cleanup: {e}")
 
 
 def setup(bot):
