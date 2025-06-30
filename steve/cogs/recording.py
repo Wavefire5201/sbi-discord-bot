@@ -37,26 +37,16 @@ class Recording(commands.Cog):
         self.recording_tasks = {}
         self.max_recording_duration = 3600 * 5  # 5 hour max recording
         self.vc = None
-        self.socket_keepalive.start()
+        # self.socket_keepalive.start()
+        self.send_packet.start()
 
     @commands.slash_command(
         name="join",
-        description="Join the voice channel and start recording",
+        description="Join the voice channel and start recording.",
     )
     @commands.guild_only()
     async def join(self, ctx: discord.ApplicationContext):
-        # Type cast to Member to access voice attribute
-        member = ctx.author
-        if not isinstance(member, discord.Member):
-            embed = discord.Embed(
-                title="Error",
-                description="This command can only be used in a server.",
-                color=discord.Color.red(),
-            )
-            await ctx.respond(embed=embed, ephemeral=True)
-            return
-
-        voice = member.voice
+        voice = ctx.author.voice
 
         if not voice:
             embed = discord.Embed(
@@ -81,7 +71,9 @@ class Recording(commands.Cog):
             await ctx.defer()
 
             # Connect to voice channel
-            vc = await voice.channel.connect(reconnect=True, timeout=10.0)
+            vc: discord.VoiceClient = await voice.channel.connect(
+                reconnect=True, timeout=10.0
+            )
 
             # Create initial status embed
             start_time = datetime.now()
@@ -112,15 +104,16 @@ class Recording(commands.Cog):
             }
             self.vc = vc
 
-            # Create a custom sink with better error handling
-            sink = SafeWaveSink()
-
             # Play recording start sound
             await self._play_recording_start_sound(vc)
 
             # Start recording with timeout protection
             vc.start_recording(
-                sink, self.recording_finished_callback, ctx.channel, ctx.guild.id
+                SafeWaveSink(),
+                self.recording_finished_callback,
+                ctx.channel,
+                ctx.guild.id,
+                sync_start=True,
             )
 
             # Set up automatic timeout
@@ -139,7 +132,7 @@ class Recording(commands.Cog):
                 description="Failed to connect to voice channel (timeout)",
                 color=discord.Color.red(),
             )
-            await ctx.followup.send(embed=embed)
+            await ctx.followup.send(embed=embed, ephemeral=True)
             logger.error(f"Timeout connecting to voice channel in guild {ctx.guild.id}")
         except Exception as e:
             logger.error(f"Error starting recording: {e}")
@@ -149,7 +142,7 @@ class Recording(commands.Cog):
                 description=f"Failed to start recording: {str(e)}",
                 color=discord.Color.red(),
             )
-            await ctx.followup.send(embed=embed)
+            await ctx.followup.send(embed=embed, ephemeral=True)
             # Clean up on error
             await self._cleanup_recording(ctx.guild.id)
 
@@ -179,7 +172,9 @@ class Recording(commands.Cog):
                 )
                 await channel.send(embed=embed)
                 logger.info(f"No audio data captured for guild {guild_id}")
-                await delete_meeting(meeting.id)
+                await delete_meeting(
+                    meeting.id
+                )  # Delete meeting as nothing was recorded
                 return
 
             # Process audio files
@@ -252,6 +247,7 @@ class Recording(commands.Cog):
                 )
 
                 await message.edit(embed=embed)
+                await self._cleanup_recording(guild_id)
                 ts_result = await start_transcription(meeting=meeting)
                 if ts_result:
                     await channel.send(
@@ -261,6 +257,8 @@ class Recording(commands.Cog):
                             color=discord.Color.green(),
                         )
                     )
+
+                return
 
             else:
                 embed = discord.Embed(
@@ -344,25 +342,6 @@ class Recording(commands.Cog):
 
         except Exception as e:
             logger.error(f"Error updating status embed for guild {guild_id}: {e}")
-
-    @commands.slash_command(name="status", description="Check recording status")
-    @commands.guild_only()
-    async def status(self, ctx: discord.ApplicationContext):
-        if ctx.guild.id not in self.connections:
-            embed = discord.Embed(
-                title="Not Recording",
-                description="Not currently recording in this server.",
-                color=discord.Color.red(),
-            )
-            await ctx.respond(embed=embed, ephemeral=True)
-            return
-
-        connection_info = self.connections[ctx.guild.id]
-        status_embed = self._create_status_embed(
-            connection_info["start_time"],
-            connection_info["voice_channel_id"],
-        )
-        await ctx.respond(embed=status_embed)
 
     async def _auto_stop_recording(self, guild_id: int, duration: int):
         """Automatically stop recording after specified duration"""
@@ -493,20 +472,37 @@ class Recording(commands.Cog):
 
         return embed
 
-    @tasks.loop(seconds=10)
-    async def socket_keepalive(self):
+    # https://github.com/Pycord-Development/pycord/issues/2310
+    # https://github.com/imayhaveborkedit/discord-ext-voice-recv/issues/8
+    # @tasks.loop(seconds=10)
+    # async def socket_keepalive(self):
+    #     """
+    #     Send silent packets to prevent Discord from closing the listening socket.
+    #     This fixes Opus decoding errors caused by socket timeouts during periods of silence.
+    #     Only sends packets during active recordings to avoid unnecessary traffic.
+    #     """
+    #     try:
+    #         if self.vc:
+    #             # Send silent audio packet to keep socket alive during recording
+    #             self.vc.send_audio_packet(b"\xf8\xff\xfe", encode=False)
+    #             logger.info("Sent keepalive packet")
+    #     except Exception as e:
+    #         logger.warning(f"Error sending keepalive packet for guild: {e}")
+    #     return
+
+    @tasks.loop(
+        seconds=10
+    )  # This can be 10 seconds, 1 minute, whatever suits your needs
+    async def send_packet(self):
         """
-        Send silent packets to prevent Discord from closing the listening socket.
-        This fixes Opus decoding errors caused by socket timeouts during periods of silence.
-        Only sends packets during active recordings to avoid unnecessary traffic.
+        We need this to send packets occasionally in case there is a period of no voice activity.
+        This will prevent our bot's listen socket from closing.
         """
         try:
             if self.vc:
-                # Send silent audio packet to keep socket alive during recording
                 self.vc.send_audio_packet(b"\xf8\xff\xfe", encode=False)
-                logger.info("Sent keepalive packet")
         except Exception as e:
-            logger.warning(f"Error sending keepalive packet for guild: {e}")
+            print(e)
         return
 
 
