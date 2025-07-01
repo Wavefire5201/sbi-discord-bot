@@ -1,5 +1,6 @@
 {
   "reportOptionalMemberAccess": false,
   "reportArgumentType": false,
-  "reportPossiblyUnboundVariable": false
+  "reportPossiblyUnboundVariable": false,
+  "reportAttributeAccessIssue": false
 }
