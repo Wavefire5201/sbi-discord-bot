@@ -152,7 +152,9 @@ class AI(commands.Cog):
 
         # TODO: add a cache in the future to speed up operations
         thread = message.channel
-        gemini_history = self.create_gemini_history(await thread.history().flatten())
+        gemini_history = await self.create_gemini_history(
+            await thread.history().flatten()
+        )
         # logger.info(f"Gemini history: {gemini_history}")
 
         chat = client.aio.chats.create(model=LLM_MODEL, history=gemini_history)
