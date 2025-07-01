@@ -203,4 +203,4 @@ async def get_transcription(id: str) -> str | None:
         str | None: The transcription text if available, None otherwise
     """
     meeting = await get_meeting(id)
-    return meeting.transcription if meeting.transcription else None
+    return meeting.transcription if meeting else None

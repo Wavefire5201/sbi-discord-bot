@@ -13,11 +13,11 @@ class Meetings(commands.Cog):
     @commands.slash_command(
         name="transcript", description="View the transcript of a meeting!"
     )
-    async def transcript(self, ctx: discord.ApplicationContext, meeting_id: str):
-        transcript = await get_transcription(meeting_id)
+    async def transcript(self, ctx: discord.ApplicationContext, id: str):
+        transcript = await get_transcription(id)
 
         if not transcript:
-            ctx.respond("No transcript found for this meeting.")
+            await ctx.respond("No transcript found for this meeting.")
             return
 
         max_content_length = 2000 - 6  # Account for ``` ```

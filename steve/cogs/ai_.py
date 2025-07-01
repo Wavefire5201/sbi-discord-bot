@@ -3,7 +3,7 @@ from discord.commands import option
 from discord.ext import commands
 from google import genai
 from utils import get_logger
-from utils.config import GEMINI_API_KEY
+from utils.config import GEMINI_API_KEY, LLM_MODEL
 
 logger = get_logger(__name__)
 client = genai.Client(api_key=GEMINI_API_KEY)
@@ -30,20 +30,61 @@ class AI(commands.Cog):
                 "Sorry, I couldn't generate a joke right now. Please try again later!"
             )
 
-    @ai.command(name="chat", description="Chat with AI")
-    @option(name="message", description="Message to send to AI")
-    async def chat(self, ctx: discord.ApplicationContext, message: str):
+    @ai.command(name="ask", description="Ask AI a question.")
+    @option(name="question", description="Question to ask AI")
+    async def ask(self, ctx: discord.ApplicationContext, question: str):
         try:
             await ctx.defer()
             response = await client.aio.models.generate_content(
                 model="gemini-2.5-flash-lite-preview-06-17",
-                contents=f"{message}",
+                contents=f"The user is asking you a question. Please limit your response to less than 500 words. Question: {question}",
             )
-            await ctx.followup.send(str(response.text))
+            await ctx.followup.send(response.text)
         except Exception as e:
             logger.error(f"Error in chat command: {e}")
             await ctx.followup.send(
-                "Sorry, I couldn't generate a response right now. Please try again later!"
+                "Sorry, I couldn't generate a response right now. Please try again later!",
+                ephemeral=True,
+            )
+
+    @ai.command(name="chat", description="Start a new chat with AI.")
+    @option(name="prompt", description="Prompt to start the chat with.")
+    async def chat(self, ctx: discord.ApplicationContext, prompt: str):
+        try:
+            await ctx.respond("Starting a new chat!", ephemeral=True)
+            title = await client.aio.models.generate_content(
+                model=LLM_MODEL,
+                contents=f"Based on this prompt, create a simple title for a chat title. Only return the chat title. Question: {prompt}",
+            )
+            thread: discord.Thread = await ctx.channel.create_thread(
+                name=title.text, type=discord.ChannelType.private_thread
+            )
+            await thread.add_user(ctx.author)
+
+            initial = await thread.send("Thinking...")
+            response = await client.aio.models.generate_content(
+                model=LLM_MODEL,
+                contents=f"{prompt}",
+            )
+            await initial.delete()
+
+            max_content_length = 2000
+            res = str(response.text)
+            if len(res) <= max_content_length:
+                await thread.send(f"{res}")
+            else:
+                chunks = []
+                for i in range(0, len(res), max_content_length):
+                    chunks.append(res[i : i + max_content_length])
+                await thread.send(f"{chunks[0]}")
+                for chunk in chunks[1:]:
+                    await thread.send(f"{chunk}")
+
+        except Exception as e:
+            logger.error(f"Error in chat command: {e}")
+            await ctx.followup.send(
+                "Sorry, I couldn't start a new chat right now. Please try again later!",
+                ephemeral=True,
             )
 
 
