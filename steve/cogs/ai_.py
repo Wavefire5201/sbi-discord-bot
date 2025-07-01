@@ -42,7 +42,7 @@ class AI(commands.Cog):
             for chunk in chunks:
                 await channel.send(chunk)
 
-    async def create_gemini_history(self, message_history):
+    def create_gemini_history(self, message_history):
         gemini_history = []
 
         for msg in reversed(message_history[:-1]):  # Exclude the current message
@@ -152,9 +152,7 @@ class AI(commands.Cog):
 
         # TODO: add a cache in the future to speed up operations
         thread = message.channel
-        gemini_history = await self.create_gemini_history(
-            await thread.history().flatten()
-        )
+        gemini_history = self.create_gemini_history(await thread.history().flatten())
         # logger.info(f"Gemini history: {gemini_history}")
 
         chat = client.aio.chats.create(model=LLM_MODEL, history=gemini_history)
