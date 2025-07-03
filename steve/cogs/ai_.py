@@ -93,6 +93,7 @@ class AI(commands.Cog):
 
     @ai.command(name="chat", description="Start a new chat with AI.")
     @option(name="prompt", description="Prompt to start the chat with.")
+    @commands.guild_only()
     async def chat(self, ctx: discord.ApplicationContext, prompt: str):
         try:
             await ctx.respond("Starting a new chat!", ephemeral=True)
@@ -125,6 +126,7 @@ class AI(commands.Cog):
         name="tokens",
         description="Returns the token count of the current conversation.",
     )
+    @commands.guild_only()
     async def tokens(self, ctx: discord.ApplicationContext):
         if not isinstance(ctx.channel, discord.Thread):
             await ctx.respond("This isn't a chat thread!", ephemeral=True)
